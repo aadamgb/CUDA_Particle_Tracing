@@ -1,0 +1,148 @@
+
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#include <stdio.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/random.h>
+#include <thrust/execution_policy.h>
+
+
+// Particle structure
+struct Particle {
+    float3 position;
+    float3 velocity;
+};
+
+
+
+__host__ __device__ float3 operator+(const float3 &a, const float3 &b) {
+  return make_float3(a.x+b.x, a.y+b.y, a.z+b.z);
+}
+
+__host__ __device__ float3 operator-(const float3& a, const float3& b) {
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+__host__ __device__ float3 operator*(const float3& a, float b) {
+    return make_float3(a.x * b, a.y * b, a.z * b);
+}
+
+__host__ __device__ float3 operator*(float b, const float3& a) {
+    return make_float3(a.x * b, a.y * b, a.z * b);
+}
+
+__host__ __device__ float3 operator/(const float3& a, float b) {
+    return make_float3(a.x / b, a.y / b, a.z / b);
+}
+
+__host__ __device__ float3& operator+=(float3& a, const float3& b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    return a;
+}
+
+__host__ __device__ float3& operator-=(float3& a, const float3& b) {
+    a.x -= b.x;
+    a.y -= b.y;
+    a.z -= b.z;
+    return a;
+}
+
+
+__device__ float3 lorentz_force(float3 velocity, float3 position) {
+    float3 E = make_float3(0.0f, 0.0f, 0.0f); // Calculate electric field
+    float3 B = make_float3(0.0f, 0.0f, 1.0f); // Calculate magnetic field
+
+    float3 v_cross_B = make_float3(
+        velocity.y * B.z - velocity.z * B.y,
+        velocity.z * B.x - velocity.x * B.z,
+        velocity.x * B.y - velocity.y * B.x
+    );
+
+    float q = 1.0f; // Charge of the particle
+    float m = 1.0f; // Mass of the particle
+    return (q/m) * (E + v_cross_B);
+}
+
+
+__device__ void rk4_step(Particle& p, float dt) {
+    float3 k1_v = lorentz_force(p.velocity, p.position);
+    float3 k1_p = p.velocity;
+
+    float3 temp_velocity = p.velocity + 0.5f * k1_v * dt;
+    float3 temp_position = p.position + 0.5f * k1_p * dt;
+    float3 k2_v = lorentz_force(p.velocity + 0.5f * k1_v * dt, p.position + 0.5f * k1_p * dt);
+    float3 k2_p = temp_velocity;
+
+    temp_velocity = p.velocity + 0.5f * k2_v * dt;
+    temp_position = p.position + 0.5f * k2_p * dt;
+    float3 k3_v = lorentz_force(p.velocity + 0.5f * k2_v * dt, p.position + 0.5f * k2_p * dt);
+    float3 k3_p = temp_velocity;
+
+    temp_velocity = p.velocity + k3_v * dt;
+    temp_position = p.position + k3_p * dt;
+    float3 k4_v = lorentz_force(p.velocity + k3_v * dt, p.position + k3_p * dt);
+    float3 k4_p = temp_velocity;
+
+    p.velocity += (k1_v + 2.0f * k2_v + 2.0f * k3_v + k4_v) * (dt / 6.0f);
+    p.position += (k1_p + 2.0f * k2_p + 2.0f * k3_p + k4_p) * (dt / 6.0f);
+}
+
+struct UpdateParticles {
+    float dt;
+    UpdateParticles(float _dt) : dt(_dt) {}
+
+    __device__ void operator()(Particle& p) {
+        rk4_step(p, dt);
+    }
+};
+
+/int main() {
+    const int numParticles = 10;
+    const int numTimesteps = 10000;
+    const float dt = 0.001f;
+
+    // Vector to store positions for plotting
+    std::vector<float> positions;
+    positions.reserve(numParticles * numTimesteps * 3);
+
+
+    thrust::host_vector<Particle> h_particles(numParticles);
+  
+    // Initialize particles with random positions and velocities
+    thrust::default_random_engine rng;
+    thrust::uniform_real_distribution<float> dist(-5.0f, 5.0f);
+    for (int i = 0; i < numParticles; ++i) {
+        h_particles[i].position = make_float3(0.0f, 0.0f, 0.0f);
+        h_particles[i].velocity = make_float3(dist(rng), dist(rng), dist(rng));
+    }
+
+    thrust::device_vector<Particle> d_particles = h_particles;
+
+    // Run simulation for numTimesteps
+    for (int t = 0; t < numTimesteps; ++t) {
+        thrust::for_each(thrust::device, d_particles.begin(), d_particles.end(), UpdateParticles(dt));
+        thrust::copy(d_particles.begin(), d_particles.end(), h_particles.begin());
+
+        for (int i = 0; i < numParticles; ++i) {
+            positions.push_back(h_particles[i].position.x);
+            positions.push_back(h_particles[i].position.y);
+            positions.push_back(h_particles[i].position.z);
+        }
+    }
+
+    // Save positions to a file
+    const char* path = "C:/Users/adame/OneDrive/Escritorio/CUDA/Particle_Tracing/.venv/particle_positions.bin";
+    std::ofstream outFile(path, std::ios::binary);
+    outFile.write(reinterpret_cast<char*>(positions.data()), positions.size() * sizeof(float));
+    outFile.close();
+
+    return 0;
+}
